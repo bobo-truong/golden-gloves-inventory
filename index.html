@@ -142,817 +142,798 @@
     </section>
     <section class="wrap hidden" id="view-settings">
       <div class="panel"><div class="hd"><h2>Sao lưu & Khởi tạo</h2></div><div class="bd grid cols-2"><div class="stat"><div class="k">Sao lưu dữ liệu</div><div class="v" style="font-size:14px;font-weight:500">Tải tệp JSON chứa sản phẩm & giao dịch</div><div style="margin-top:10px" class="flex"><button class="btn" id="btn-export-json">Tải JSON</button><label class="btn ghost" for="import-json">Phục hồi JSON<input id="import-json" type="file" accept="application/json" style="display:none"></label></div><div class="hint" style="margin-top:8px">Khuyến nghị sao lưu mỗi ngày.</div></div><div class="stat"><div class="k">Dữ liệu mẫu</div><div class="v" style="font-size:14px;font-weight:500">Tạo 4 SKU mẫu và vài giao dịch</div><div style="margin-top:10px" class="flex"><button class="btn" id="btn-seed">Tạo dữ liệu mẫu</button><button class="btn danger" id="btn-reset">Xóa toàn bộ dữ liệu</button></div><div class="hint" style="margin-top:8px">Không thể hoàn tác khi xóa.</div></div></div></div>
-       </section>
+    </section>
   </main>
   <div class="toast" id="toast"></div>
+
+  <!-- ===================================================================== -->
+  <!-- TOÀN BỘ JAVASCRIPT NÊN ĐƯỢC ĐẶT Ở ĐÂY, NGAY TRƯỚC THẺ ĐÓNG </body> -->
+  <!-- Điều này đảm bảo tất cả HTML đã được tải xong trước khi script chạy. -->
+  <!-- ===================================================================== -->
   <script>
-    // --- UTILITIES ---
-    const $ = (s, c = document) => c.querySelector(s);
-    const $$ = (s, c = document) => Array.from(c.querySelectorAll(s));
-    const fmt = new Intl.NumberFormat('vi-VN');
-    const money = v => fmt.format(Math.round(Number(v || 0)));
-    const today = () => new Date().toISOString().slice(0, 10);
-    const uuid = () => crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2);
-    const toast = m => {
-      const t = $('#toast');
-      t.textContent = m;
-      t.classList.add('show');
-      setTimeout(() => t.classList.remove('show'), 2400)
-    };
+    // Bọc toàn bộ code trong một hàm (IIFE) để tránh làm "bẩn" global scope.
+    (function() {
+      // --- UTILITIES ---
+      const $ = (s, c = document) => c.querySelector(s);
+      const $$ = (s, c = document) => Array.from(c.querySelectorAll(s));
+      const fmt = new Intl.NumberFormat('vi-VN');
+      const money = v => fmt.format(Math.round(Number(v || 0)));
+      const today = () => new Date().toISOString().slice(0, 10);
+      const uuid = () => crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2);
+      const toast = m => {
+        const t = $('#toast');
+        t.textContent = m;
+        t.classList.add('show');
+        setTimeout(() => t.classList.remove('show'), 2400)
+      };
 
-    // --- DATABASE (LOCALSTORAGE) ---
-    const DB = {
-      key: 'gg_inv_v1',
-      load() {
-        const raw = localStorage.getItem(this.key);
-        if (!raw) return { products: [], txns: [], settings: {} };
-        try {
-          return JSON.parse(raw)
-        } catch (e) {
-          console.error("Failed to parse data from localStorage", e);
-          return { products: [], txns: [], settings: {} }
-        }
-      },
-      save(d) {
-        try {
-          localStorage.setItem(this.key, JSON.stringify(d));
-          // Sau khi lưu, dispatch một event để thông báo dữ liệu đã thay đổi
-          window.dispatchEvent(new Event('datachanged'));
-        } catch (e) {
-          console.error("Failed to save data to localStorage", e);
-          toast("Lỗi: Không thể lưu dữ liệu.");
-        }
-      },
-      get data() { return this.load() },
-      set data(d) { this.save(d) },
-      reset() { this.save({ products: [], txns: [], settings: {} }) }
-    };
-
-    // --- CORE LOGIC ---
-    const App = {
-      // State
-      state: {
-        currentView: 'dash',
-        editingProductId: null,
-        countSession: null,
-      },
-      
-      // Getters
-      get products() { return DB.data.products || [] },
-      get txns() { return DB.data.txns || [] },
-
-      // Methods
-      getProduct(id) {
-        return this.products.find(p => p.id === id);
-      },
-
-      calculateStock(productId, atDate = null) {
-        return this.txns
-          .filter(t => t.productId === productId && (!atDate || t.date <= atDate))
-          .reduce((sum, t) => {
-            const qty = Number(t.qty) || 0;
-            if (t.type === 'OUT') return sum - qty;
-            if (t.type === 'ADJ') return qty; // Điều chỉnh sẽ set tồn kho về giá trị mới
-            return sum + qty; // IN
-          }, 0);
-      },
-      
-      stockLots(productId) {
-        const lots = {};
-        this.txns.filter(t => t.productId === productId && t.lot).forEach(t => {
-            const key = t.lot + '|' + (t.expiry || '');
-            if (!lots[key]) lots[key] = { lot: t.lot, expiry: t.expiry || '', qty: 0 };
-            const qty = Number(t.qty) || 0;
-            if (t.type === 'OUT') lots[key].qty -= qty;
-            else if (t.type === 'ADJ') lots[key].qty = qty;
-            else lots[key].qty += qty;
-        });
-        return Object.values(lots)
-            .filter(l => l.qty > 0)
-            .sort((a, b) => (a.expiry || '9999-99-99').localeCompare(b.expiry || '9999-99-99'));
-      },
-
-      nextExpiring(productId) {
-        const lots = this.stockLots(productId);
-        return lots.length ? lots[0] : null;
-      },
-
-      // --- INITIALIZATION ---
-      init() {
-        this.render();
-        this.attachListeners();
-        // Set initial dates for forms
-        $('#t-date').value = today();
-        $('#c-date').value = today();
-        $('#r-to').value = today();
-        const oneMonthAgo = new Date();
-        oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
-        $('#r-from').value = oneMonthAgo.toISOString().slice(0, 10);
-        
-        // Theme toggle from localStorage
-        if (localStorage.getItem('gg_theme') === 'light') {
-            document.documentElement.setAttribute('data-theme', 'light');
-        }
-      },
-
-      // --- EVENT LISTENERS ---
-      attachListeners() {
-        // Main navigation
-        $('#tabs').addEventListener('click', e => {
-          if (e.target.classList.contains('tab')) {
-            this.state.currentView = e.target.dataset.tab;
-            this.render();
+      // --- DATABASE (LOCALSTORAGE) ---
+      const DB = {
+        key: 'gg_inv_v1',
+        load() {
+          const raw = localStorage.getItem(this.key);
+          if (!raw) return { products: [], txns: [], settings: {} };
+          try {
+            return JSON.parse(raw)
+          } catch (e) {
+            console.error("Failed to parse data from localStorage", e);
+            return { products: [], txns: [], settings: {} }
           }
-        });
+        },
+        save(d) {
+          try {
+            localStorage.setItem(this.key, JSON.stringify(d));
+            window.dispatchEvent(new Event('datachanged'));
+          } catch (e) {
+            console.error("Failed to save data to localStorage", e);
+            toast("Lỗi: Không thể lưu dữ liệu.");
+          }
+        },
+        get data() { return this.load() },
+        set data(d) { this.save(d) },
+        reset() { this.save({ products: [], txns: [], settings: {} }) }
+      };
+
+      // --- CORE LOGIC ---
+      const App = {
+        state: {
+          currentView: 'dash',
+          editingProductId: null,
+          countSession: null,
+        },
         
-        // Theme toggle
-        $('#theme-toggle').addEventListener('click', () => {
-            const currentTheme = document.documentElement.getAttribute('data-theme');
-            if (currentTheme === 'light') {
-                document.documentElement.removeAttribute('data-theme');
-                localStorage.removeItem('gg_theme');
-            } else {
-                document.documentElement.setAttribute('data-theme', 'light');
-                localStorage.setItem('gg_theme', 'light');
+        get products() { return DB.data.products || [] },
+        get txns() { return DB.data.txns || [] },
+
+        getProduct(id) {
+          return this.products.find(p => p.id === id);
+        },
+
+        calculateStock(productId, atDate = null, wh = '') {
+            let stock = 0;
+            const relevantTxns = this.txns
+                .filter(t => t.productId === productId && (!atDate || t.date <= atDate) && (!wh || t.wh === wh))
+                .sort((a, b) => a.date.localeCompare(b.date));
+
+            for (const t of relevantTxns) {
+                const qty = Number(t.qty) || 0;
+                if (t.type === 'ADJ') {
+                    stock = qty;
+                } else if (t.type === 'OUT') {
+                    stock -= qty;
+                } else { // IN
+                    stock += qty;
+                }
             }
-        });
-
-        // Re-render on data change
-        window.addEventListener('datachanged', () => this.render());
-
-        // Products View
-        $('#btn-new-prod').addEventListener('click', () => this.showProdForm());
-        $('#btn-cancel-prod').addEventListener('click', () => this.hideProdForm());
-        $('#btn-save-prod').addEventListener('click', () => this.saveProduct());
-        $('#prod-table tbody').addEventListener('click', e => {
-          if (e.target.closest('.btn-edit')) this.editProduct(e.target.closest('.btn-edit').dataset.id);
-          if (e.target.closest('.btn-delete')) this.deleteProduct(e.target.closest('.btn-delete').dataset.id);
-        });
-        $('#btn-export-products').addEventListener('click', () => this.exportProductsToCsv());
-
-        // Transactions View
-        $('#btn-add-txn').addEventListener('click', () => this.addTransaction());
-        $('#btn-clear-txn').addEventListener('click', () => $('#txn-form').reset());
-        $('#t-prod').addEventListener('change', () => this.updateTxnHints());
-        $('#btn-undo').addEventListener('click', () => this.undoLastTransaction());
-        $('#btn-export-txn').addEventListener('click', () => this.exportTxnsToCsv());
-        $('#txn-table tbody').addEventListener('click', e => {
-            if (e.target.closest('.btn-delete-txn')) this.deleteTransaction(e.target.closest('.btn-delete-txn').dataset.id);
-        });
-
-        // Dashboard View
-        ['#dash-search', '#f-size', '#f-color', '#f-material', '#f-status', '#f-warehouse'].forEach(sel => {
-            $(sel).addEventListener('input', () => this.renderStockTable());
-        });
-
-        // Count View
-        $('#c-start').addEventListener('click', () => this.startCount());
-        $('#c-cancel').addEventListener('click', () => this.cancelCount());
-        $('#c-commit').addEventListener('click', () => this.commitCount());
-        $('#c-print').addEventListener('click', () => window.print());
-
-        // Report View
-        $('#btn-run-report').addEventListener('click', () => this.runReport());
-        $('#btn-export-report').addEventListener('click', () => this.exportReportToCsv());
-
-        // Settings View
-        $('#btn-seed').addEventListener('click', () => this.seedData());
-        $('#btn-reset').addEventListener('click', () => this.resetData());
-        $('#btn-export-json').addEventListener('click', () => this.exportJson());
-        $('#import-json').addEventListener('change', e => this.importJson(e));
-      },
-
-      // --- RENDER METHODS ---
-      render() {
-        // Switch view
-        $$('main > section').forEach(el => el.classList.add('hidden'));
-        $(`#view-${this.state.currentView}`).classList.remove('hidden');
-
-        // Call specific renderers based on view
-        switch (this.state.currentView) {
-          case 'dash': this.renderDashboard(); break;
-          case 'products': this.renderProducts(); break;
-          case 'txn': this.renderTransactions(); break;
-        }
+            return stock;
+        },
         
-        this.updateUndoButton();
-      },
+        stockLots(productId, wh = '') {
+          const lots = {};
+          this.txns.filter(t => t.productId === productId && t.lot && (!wh || t.wh === wh)).forEach(t => {
+              const key = t.lot + '|' + (t.expiry || '');
+              if (!lots[key]) lots[key] = { lot: t.lot, expiry: t.expiry || '', qty: 0 };
+              const qty = Number(t.qty) || 0;
+              if (t.type === 'OUT') lots[key].qty -= qty;
+              else if (t.type === 'ADJ') lots[key].qty = qty; // Note: ADJ on a lot level is complex, this is a simplification
+              else lots[key].qty += qty;
+          });
+          return Object.values(lots)
+              .filter(l => l.qty > 0)
+              .sort((a, b) => (a.expiry || '9999-99-99').localeCompare(b.expiry || '9999-99-99'));
+        },
 
-      renderDashboard() {
-        const allProducts = this.products;
-        let totalStock = 0;
-        let totalValue = 0;
+        nextExpiring(productId, wh = '') {
+          const lots = this.stockLots(productId, wh);
+          return lots.length ? lots[0] : null;
+        },
 
-        allProducts.forEach(p => {
-          const stock = this.calculateStock(p.id);
-          totalStock += stock;
-          totalValue += stock * (Number(p.cost) || 0);
-        });
+        init() {
+          this.render();
+          this.attachListeners();
+          $('#t-date').value = today();
+          $('#c-date').value = today();
+          $('#r-to').value = today();
+          const oneMonthAgo = new Date();
+          oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+          $('#r-from').value = oneMonthAgo.toISOString().slice(0, 10);
+          
+          if (localStorage.getItem('gg_theme') === 'light') {
+              document.documentElement.setAttribute('data-theme', 'light');
+          }
+        },
 
-        $('#stat-skus').textContent = allProducts.length;
-        $('#stat-stock').textContent = money(totalStock);
-        $('#stat-value').textContent = money(totalValue);
-
-        this.renderLowStockList();
-        this.renderExpiryList();
-        this.renderStockTable();
-        this.populateWarehouseFilter();
-      },
-      
-      populateWarehouseFilter() {
-        const warehouses = [...new Set(this.txns.map(t => t.wh).filter(Boolean))];
-        const select = $('#f-warehouse');
-        const reportSelect = $('#r-warehouse');
-        // Keep the first option ("Tất cả")
-        select.innerHTML = '<option value="">Kho (tất cả)</option>';
-        reportSelect.innerHTML = '<option value="">Kho (tất cả)</option>';
-        warehouses.sort().forEach(wh => {
-            select.innerHTML += `<option>${wh}</option>`;
-            reportSelect.innerHTML += `<option>${wh}</option>`;
-        });
-      },
-
-      renderLowStockList() {
-        const lowStockProducts = this.products.filter(p => {
-          const stock = this.calculateStock(p.id);
-          return stock <= (Number(p.reorder) || 0);
-        });
-
-        const list = $('#low-list');
-        if (lowStockProducts.length === 0) {
-          list.innerHTML = `<div class="hint">Không có sản phẩm nào dưới mức đặt hàng.</div>`;
-          return;
-        }
-        list.innerHTML = lowStockProducts.map(p => `
-          <div class="flex" style="justify-content:space-between; padding: 4px 0;">
-            <span>${p.name} (SKU: ${p.sku})</span>
-            <span class="tag">Tồn: ${money(this.calculateStock(p.id))} / Đặt: ${money(p.reorder)}</span>
-          </div>
-        `).join('');
-      },
-
-      renderExpiryList() {
-        const expiringLots = [];
-        const daysThreshold = 90; // Cảnh báo trước 90 ngày
-        const thresholdDate = new Date();
-        thresholdDate.setDate(thresholdDate.getDate() + daysThreshold);
-
-        this.products.forEach(p => {
-          this.stockLots(p.id).forEach(lot => {
-            if (lot.expiry) {
-              const expiryDate = new Date(lot.expiry);
-              if (expiryDate <= thresholdDate) {
-                expiringLots.push({ product: p, lot });
-              }
+        attachListeners() {
+          $('#tabs').addEventListener('click', e => {
+            if (e.target.classList.contains('tab')) {
+              this.state.currentView = e.target.dataset.tab;
+              this.render();
             }
           });
-        });
-
-        expiringLots.sort((a, b) => new Date(a.lot.expiry) - new Date(b.lot.expiry));
-
-        const list = $('#exp-list');
-        if (expiringLots.length === 0) {
-          list.innerHTML = `<div class="hint">Không có lô nào sắp hết hạn.</div>`;
-          return;
-        }
-        list.innerHTML = expiringLots.map(({ product, lot }) => `
-          <div class="flex" style="justify-content:space-between; padding: 4px 0;">
-            <span>${product.name} (Lô: ${lot.lot})</span>
-            <span class="tag" style="color:var(--warn)">HSD: ${lot.expiry}</span>
-          </div>
-        `).join('');
-      },
-
-      renderStockTable() {
-        const tbody = $('#stock-table tbody');
-        const searchTerm = $('#dash-search').value.toLowerCase();
-        const fSize = $('#f-size').value;
-        const fColor = $('#f-color').value;
-        const fMaterial = $('#f-material').value;
-        const fStatus = $('#f-status').value;
-        const fWarehouse = $('#f-warehouse').value;
-
-        const filteredProducts = this.products.filter(p => {
-            const stock = this.calculateStock(p.id, fWarehouse);
-            const matchSearch = searchTerm === '' || Object.values(p).some(val => String(val).toLowerCase().includes(searchTerm));
-            const matchSize = fSize === '' || p.size === fSize;
-            const matchColor = fColor === '' || p.color === fColor;
-            const matchMaterial = fMaterial === '' || p.material === fMaterial;
-            const matchStatus = fStatus === '' || (fStatus === 'low' && stock <= (p.reorder || 0)) || (fStatus === 'ok' && stock > (p.reorder || 0));
-            
-            return matchSearch && matchSize && matchColor && matchMaterial && matchStatus;
-        });
-
-        if (filteredProducts.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="8" class="hint" style="text-align:center;padding:20px;">Không tìm thấy sản phẩm.</td></tr>`;
-            return;
-        }
-
-        tbody.innerHTML = filteredProducts.map(p => {
-          const stock = this.calculateStock(p.id, fWarehouse);
-          const value = stock * (Number(p.cost) || 0);
-          const nextExp = this.nextExpiring(p.id, fWarehouse);
-          const reorderPoint = Number(p.reorder) || 0;
-          const stockClass = stock <= reorderPoint ? 'style="color:var(--warn)"' : '';
           
-          return `
+          $('#theme-toggle').addEventListener('click', () => {
+              const currentTheme = document.documentElement.getAttribute('data-theme');
+              if (currentTheme === 'light') {
+                  document.documentElement.removeAttribute('data-theme');
+                  localStorage.removeItem('gg_theme');
+              } else {
+                  document.documentElement.setAttribute('data-theme', 'light');
+                  localStorage.setItem('gg_theme', 'light');
+              }
+          });
+
+          window.addEventListener('datachanged', () => this.render());
+
+          $('#btn-new-prod').addEventListener('click', () => this.showProdForm());
+          $('#btn-cancel-prod').addEventListener('click', () => this.hideProdForm());
+          $('#btn-save-prod').addEventListener('click', () => this.saveProduct());
+          $('#prod-table tbody').addEventListener('click', e => {
+            if (e.target.closest('.btn-edit')) this.editProduct(e.target.closest('.btn-edit').dataset.id);
+            if (e.target.closest('.btn-delete')) this.deleteProduct(e.target.closest('.btn-delete').dataset.id);
+          });
+          $('#btn-export-products').addEventListener('click', () => this.exportProductsToCsv());
+
+          $('#btn-add-txn').addEventListener('click', () => this.addTransaction());
+          $('#btn-clear-txn').addEventListener('click', () => {
+              $('#txn-form').reset();
+              $('#t-date').value = today();
+          });
+          $('#t-prod').addEventListener('change', () => this.updateTxnHints());
+          $('#btn-undo').addEventListener('click', () => this.undoLastTransaction());
+          $('#btn-export-txn').addEventListener('click', () => this.exportTxnsToCsv());
+          $('#txn-table tbody').addEventListener('click', e => {
+              if (e.target.closest('.btn-delete-txn')) this.deleteTransaction(e.target.closest('.btn-delete-txn').dataset.id);
+          });
+
+          ['#dash-search', '#f-size', '#f-color', '#f-material', '#f-status', '#f-warehouse'].forEach(sel => {
+              $(sel).addEventListener('input', () => this.renderStockTable());
+          });
+
+          $('#c-start').addEventListener('click', () => this.startCount());
+          $('#c-cancel').addEventListener('click', () => this.cancelCount());
+          $('#c-commit').addEventListener('click', () => this.commitCount());
+          $('#c-print').addEventListener('click', () => window.print());
+
+          $('#btn-run-report').addEventListener('click', () => this.runReport());
+          $('#btn-export-report').addEventListener('click', () => this.exportReportToCsv());
+
+          $('#btn-seed').addEventListener('click', () => this.seedData());
+          $('#btn-reset').addEventListener('click', () => this.resetData());
+          $('#btn-export-json').addEventListener('click', () => this.exportJson());
+          $('#import-json').addEventListener('change', e => this.importJson(e));
+        },
+
+        render() {
+          $$('main > section').forEach(el => el.classList.add('hidden'));
+          $(`#view-${this.state.currentView}`).classList.remove('hidden');
+
+          switch (this.state.currentView) {
+            case 'dash': this.renderDashboard(); break;
+            case 'products': this.renderProducts(); break;
+            case 'txn': this.renderTransactions(); break;
+            case 'report': this.populateWarehouseFilter(); break;
+          }
+          this.updateUndoButton();
+        },
+
+        renderDashboard() {
+          const allProducts = this.products;
+          let totalStock = 0;
+          let totalValue = 0;
+
+          allProducts.forEach(p => {
+            const stock = this.calculateStock(p.id);
+            totalStock += stock;
+            totalValue += stock * (Number(p.cost) || 0);
+          });
+
+          $('#stat-skus').textContent = allProducts.length;
+          $('#stat-stock').textContent = money(totalStock);
+          $('#stat-value').textContent = money(totalValue);
+
+          this.renderLowStockList();
+          this.renderExpiryList();
+          this.renderStockTable();
+          this.populateWarehouseFilter();
+        },
+        
+        populateWarehouseFilter() {
+          const warehouses = [...new Set(this.txns.map(t => t.wh).filter(Boolean))];
+          const dashSelect = $('#f-warehouse');
+          const reportSelect = $('#r-warehouse');
+          const currentDashVal = dashSelect.value;
+          const currentReportVal = reportSelect.value;
+          
+          dashSelect.innerHTML = '<option value="">Kho (tất cả)</option>';
+          reportSelect.innerHTML = '<option value="">Kho (tất cả)</option>';
+          
+          warehouses.sort().forEach(wh => {
+              dashSelect.innerHTML += `<option value="${wh}">${wh}</option>`;
+              reportSelect.innerHTML += `<option value="${wh}">${wh}</option>`;
+          });
+          dashSelect.value = currentDashVal;
+          reportSelect.value = currentReportVal;
+        },
+
+        renderLowStockList() {
+          const lowStockProducts = this.products.filter(p => {
+            const stock = this.calculateStock(p.id);
+            return stock <= (Number(p.reorder) || 0) && p.reorder > 0;
+          });
+
+          const list = $('#low-list');
+          if (lowStockProducts.length === 0) {
+            list.innerHTML = `<div class="hint">Không có sản phẩm nào dưới mức đặt hàng.</div>`;
+            return;
+          }
+          list.innerHTML = lowStockProducts.map(p => `
+            <div class="flex" style="justify-content:space-between; padding: 4px 0;">
+              <span>${p.name} (SKU: ${p.sku})</span>
+              <span class="tag">Tồn: ${money(this.calculateStock(p.id))} / Đặt: ${money(p.reorder)}</span>
+            </div>
+          `).join('');
+        },
+
+        renderExpiryList() {
+          const expiringLots = [];
+          const daysThreshold = 90;
+          const thresholdDate = new Date();
+          thresholdDate.setDate(thresholdDate.getDate() + daysThreshold);
+
+          this.products.forEach(p => {
+            this.stockLots(p.id).forEach(lot => {
+              if (lot.expiry) {
+                const expiryDate = new Date(lot.expiry);
+                if (expiryDate <= thresholdDate) {
+                  expiringLots.push({ product: p, lot });
+                }
+              }
+            });
+          });
+
+          expiringLots.sort((a, b) => new Date(a.lot.expiry) - new Date(b.lot.expiry));
+
+          const list = $('#exp-list');
+          if (expiringLots.length === 0) {
+            list.innerHTML = `<div class="hint">Không có lô nào sắp hết hạn trong ${daysThreshold} ngày tới.</div>`;
+            return;
+          }
+          list.innerHTML = expiringLots.map(({ product, lot }) => `
+            <div class="flex" style="justify-content:space-between; padding: 4px 0;">
+              <span>${product.name} (Lô: ${lot.lot})</span>
+              <span class="tag" style="color:var(--warn)">HSD: ${lot.expiry}</span>
+            </div>
+          `).join('');
+        },
+
+        renderStockTable() {
+          const tbody = $('#stock-table tbody');
+          const searchTerm = $('#dash-search').value.toLowerCase();
+          const fSize = $('#f-size').value;
+          const fColor = $('#f-color').value;
+          const fMaterial = $('#f-material').value;
+          const fStatus = $('#f-status').value;
+          const fWarehouse = $('#f-warehouse').value;
+
+          const filteredProducts = this.products.filter(p => {
+              const stock = this.calculateStock(p.id, null, fWarehouse);
+              const reorderPoint = Number(p.reorder) || 0;
+              const matchSearch = searchTerm === '' || Object.values(p).some(val => String(val).toLowerCase().includes(searchTerm));
+              const matchSize = fSize === '' || p.size === fSize;
+              const matchColor = fColor === '' || p.color === fColor;
+              const matchMaterial = fMaterial === '' || p.material === fMaterial;
+              const matchStatus = fStatus === '' || (fStatus === 'low' && stock <= reorderPoint && reorderPoint > 0) || (fStatus === 'ok' && stock > reorderPoint);
+              
+              return matchSearch && matchSize && matchColor && matchMaterial && matchStatus;
+          });
+
+          if (filteredProducts.length === 0) {
+              tbody.innerHTML = `<tr><td colspan="8" class="hint" style="text-align:center;padding:20px;">Không tìm thấy sản phẩm.</td></tr>`;
+              return;
+          }
+
+          tbody.innerHTML = filteredProducts.map(p => {
+            const stock = this.calculateStock(p.id, null, fWarehouse);
+            const value = stock * (Number(p.cost) || 0);
+            const nextExp = this.nextExpiring(p.id, fWarehouse);
+            const reorderPoint = Number(p.reorder) || 0;
+            const stockClass = stock <= reorderPoint && reorderPoint > 0 ? 'style="color:var(--warn)"' : '';
+            
+            return `
+              <tr>
+                <td>${p.sku}</td>
+                <td>${p.name}</td>
+                <td>${p.size}, ${p.color}, ${p.material}</td>
+                <td ${stockClass}><b>${money(stock)}</b></td>
+                <td>${money(reorderPoint)}</td>
+                <td>${money(p.cost)}</td>
+                <td>${money(value)}</td>
+                <td>${nextExp ? `${nextExp.lot} (${nextExp.expiry || 'N/A'})` : '—'}</td>
+              </tr>
+            `;
+          }).join('');
+        },
+
+        renderProducts() {
+          const tbody = $('#prod-table tbody');
+          if (this.products.length === 0) {
+              tbody.innerHTML = `<tr><td colspan="12" class="hint" style="text-align:center;padding:20px;">Chưa có sản phẩm nào. Hãy nhấn "+ Thêm sản phẩm".</td></tr>`;
+              return;
+          }
+          tbody.innerHTML = [...this.products].sort((a,b) => a.sku.localeCompare(b.sku)).map(p => `
             <tr>
               <td>${p.sku}</td>
               <td>${p.name}</td>
-              <td>${p.size}, ${p.color}, ${p.material}</td>
-              <td ${stockClass}>${money(stock)}</td>
-              <td>${money(reorderPoint)}</td>
+              <td>${p.size}</td>
+              <td>${p.color}</td>
+              <td>${p.material}</td>
+              <td>${p.thick || '—'}</td>
+              <td>${p.perbox}</td>
+              <td>${p.percarton}</td>
               <td>${money(p.cost)}</td>
-              <td>${money(value)}</td>
-              <td>${nextExp ? `${nextExp.lot} (${nextExp.expiry || 'N/A'})` : '—'}</td>
+              <td>${money(p.price)}</td>
+              <td>${money(p.reorder)}</td>
+              <td class="nowrap">
+                <button class="btn btn-edit" data-id="${p.id}">Sửa</button>
+                <button class="btn btn-delete" data-id="${p.id}">Xóa</button>
+              </td>
             </tr>
-          `;
-        }).join('');
-      },
+          `).join('');
+        },
 
-      renderProducts() {
-        const tbody = $('#prod-table tbody');
-        if (this.products.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="12" class="hint" style="text-align:center;padding:20px;">Chưa có sản phẩm nào. Hãy nhấn "+ Thêm sản phẩm".</td></tr>`;
-            return;
-        }
-        tbody.innerHTML = this.products.map(p => `
-          <tr>
-            <td>${p.sku}</td>
-            <td>${p.name}</td>
-            <td>${p.size}</td>
-            <td>${p.color}</td>
-            <td>${p.material}</td>
-            <td>${p.thick || '—'}</td>
-            <td>${p.perbox}</td>
-            <td>${p.percarton}</td>
-            <td>${money(p.cost)}</td>
-            <td>${money(p.price)}</td>
-            <td>${money(p.reorder)}</td>
-            <td class="nowrap">
-              <button class="btn btn-edit" data-id="${p.id}">Sửa</button>
-              <button class="btn btn-delete" data-id="${p.id}">Xóa</button>
-            </td>
-          </tr>
-        `).join('');
-      },
-
-      renderTransactions() {
-        const tbody = $('#txn-table tbody');
-        // Sort transactions by date descending
-        const sortedTxns = [...this.txns].sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
-        
-        if (sortedTxns.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="10" class="hint" style="text-align:center;padding:20px;">Chưa có giao dịch nào.</td></tr>`;
-            return;
-        }
-
-        tbody.innerHTML = sortedTxns.slice(0, 100).map(t => { // Show latest 100
-          const p = this.getProduct(t.productId);
-          const typeMap = { 'IN': 'Nhập', 'OUT': 'Xuất', 'ADJ': 'Điều chỉnh' };
-          const typeClass = { 'IN': 'color:var(--ok)', 'OUT': 'color:var(--danger)', 'ADJ': 'color:var(--warn)' };
-          return `
-            <tr>
-              <td>${t.date}</td>
-              <td style="${typeClass[t.type]}">${typeMap[t.type]}</td>
-              <td>${p ? p.sku : 'N/A'}</td>
-              <td>${p ? p.name : 'Sản phẩm đã xóa'}</td>
-              <td>${money(t.qty)}</td>
-              <td>${t.lot || '—'}</td>
-              <td>${t.expiry || '—'}</td>
-              <td>${t.wh || '—'}</td>
-              <td>${t.note || '—'}</td>
-              <td><button class="btn btn-delete-txn" data-id="${t.id}">Xóa</button></td>
-            </tr>
-          `;
-        }).join('');
-        this.populateTxnProductSelect();
-      },
-
-      populateTxnProductSelect() {
-        const select = $('#t-prod');
-        select.innerHTML = '<option value="">-- Chọn sản phẩm --</option>' + this.products.map(p =>
-          `<option value="${p.id}">${p.name} (SKU: ${p.sku})</option>`
-        ).join('');
-      },
-      
-      updateTxnHints() {
-        const productId = $('#t-prod').value;
-        if (!productId) {
-            $('#unit-hint').textContent = '—';
-            $('#fefo-hint').textContent = '—';
-            return;
-        }
-        const p = this.getProduct(productId);
-        $('#unit-hint').textContent = `1 thùng = ${p.percarton} hộp`;
-        
-        const nextExp = this.nextExpiring(productId);
-        if (nextExp) {
-            $('#fefo-hint').textContent = `Lô xuất đi gần nhất: ${nextExp.lot} (HSD: ${nextExp.expiry || 'N/A'}), tồn: ${money(nextExp.qty)}`;
-        } else {
-            $('#fefo-hint').textContent = `Sản phẩm chưa có lô nào.`
-        }
-      },
-      
-      updateUndoButton() {
-        $('#btn-undo').disabled = this.txns.length === 0;
-      },
-
-      // --- ACTION METHODS ---
-      showProdForm() {
-        this.state.editingProductId = null;
-        $('#prod-form-panel').style.display = 'block';
-        $('#prod-form-title').textContent = 'Thêm sản phẩm mới';
-        $('#prod-form').reset();
-        $('#p-sku').focus();
-      },
-
-      hideProdForm() {
-        $('#prod-form-panel').style.display = 'none';
-      },
-
-      saveProduct() {
-        const sku = $('#p-sku').value.trim();
-        const name = $('#p-name').value.trim();
-        if (!sku || !name) {
-          toast("Lỗi: SKU và Tên sản phẩm là bắt buộc.");
-          return;
-        }
-
-        const data = DB.data;
-        const newProduct = {
-          id: this.state.editingProductId || uuid(),
-          sku, name,
-          material: $('#p-material').value,
-          size: $('#p-size').value,
-          color: $('#p-color').value,
-          thick: $('#p-thick').value,
-          reorder: $('#p-reorder').value,
-          perbox: $('#p-perbox').value,
-          percarton: $('#p-percarton').value,
-          cost: $('#p-cost').value,
-          price: $('#p-price').value,
-          note: $('#p-note').value,
-        };
-
-        if (this.state.editingProductId) {
-          // Update
-          const index = data.products.findIndex(p => p.id === this.state.editingProductId);
-          data.products[index] = newProduct;
-          toast("Đã cập nhật sản phẩm.");
-        } else {
-          // Create
-          if (data.products.some(p => p.sku.toLowerCase() === sku.toLowerCase())) {
-              toast("Lỗi: SKU đã tồn tại.");
+        renderTransactions() {
+          const tbody = $('#txn-table tbody');
+          const sortedTxns = [...this.txns].sort((a, b) => (b.date + b.id).localeCompare(a.date + a.id));
+          
+          if (sortedTxns.length === 0) {
+              tbody.innerHTML = `<tr><td colspan="10" class="hint" style="text-align:center;padding:20px;">Chưa có giao dịch nào.</td></tr>`;
               return;
           }
-          data.products.push(newProduct);
-          toast("Đã thêm sản phẩm mới.");
-        }
-        DB.data = data;
-        this.hideProdForm();
-      },
 
-      editProduct(id) {
-        const p = this.getProduct(id);
-        if (!p) return;
-        this.showProdForm();
-        $('#prod-form-title').textContent = 'Chỉnh sửa sản phẩm';
-        this.state.editingProductId = id;
-
-        $('#p-id').value = p.id;
-        $('#p-sku').value = p.sku;
-        $('#p-name').value = p.name;
-        $('#p-material').value = p.material;
-        $('#p-size').value = p.size;
-        $('#p-color').value = p.color;
-        $('#p-thick').value = p.thick;
-        $('#p-reorder').value = p.reorder;
-        $('#p-perbox').value = p.perbox;
-        $('#p-percarton').value = p.percarton;
-        $('#p-cost').value = p.cost;
-        $('#p-price').value = p.price;
-        $('#p-note').value = p.note;
-      },
-
-      deleteProduct(id) {
-        if (!confirm("Bạn có chắc muốn xóa sản phẩm này? Mọi giao dịch liên quan sẽ không hiển thị tên sản phẩm nữa.")) return;
-        const data = DB.data;
-        data.products = data.products.filter(p => p.id !== id);
-        DB.data = data;
-        toast("Đã xóa sản phẩm.");
-      },
-      
-      deleteTransaction(id) {
-        if (!confirm("Bạn có chắc muốn xóa vĩnh viễn giao dịch này? Hành động này không thể hoàn tác.")) return;
-        const data = DB.data;
-        data.txns = data.txns.filter(t => t.id !== id);
-        DB.data = data;
-        toast("Đã xóa giao dịch.");
-      },
-
-      addTransaction() {
-        const productId = $('#t-prod').value;
-        if (!productId) {
-          toast("Vui lòng chọn một sản phẩm.");
-          return;
-        }
-        const product = this.getProduct(productId);
-        const qtyInput = Number($('#t-qty').value);
-        const unit = $('#t-unit').value;
-        const qtyInBoxes = unit === 'CARTON' ? qtyInput * (Number(product.percarton) || 1) : qtyInput;
-        
-        if (qtyInBoxes <= 0) {
-            toast("Số lượng phải lớn hơn 0.");
-            return;
-        }
-
-        const data = DB.data;
-        const newTxn = {
-          id: uuid(),
-          productId,
-          type: $('#t-type').value,
-          qty: qtyInBoxes,
-          date: $('#t-date').value || today(),
-          lot: $('#t-lot').value.trim(),
-          expiry: $('#t-exp').value,
-          wh: $('#t-warehouse').value.trim(),
-          note: $('#t-note').value.trim(),
-        };
-        data.txns.push(newTxn);
-        DB.data = data;
-        toast("Đã thêm giao dịch.");
-        $('#txn-form').reset();
-        $('#t-date').value = today(); // Reset date to today
-      },
-      
-      undoLastTransaction() {
-        if (this.txns.length === 0) return;
-        if (!confirm("Bạn có chắc muốn hoàn tác (xóa) giao dịch cuối cùng?")) return;
-        
-        const data = DB.data;
-        // Find the latest transaction to remove
-        data.txns.sort((a, b) => (b.date + b.id).localeCompare(a.date + a.id));
-        data.txns.shift(); // Remove the first element which is the latest
-        DB.data = data;
-        toast("Đã hoàn tác giao dịch cuối cùng.");
-      },
-
-      startCount() {
-        const name = $('#c-name').value || 'Kiểm kê';
-        const date = $('#c-date').value || today();
-        const note = $('#c-note').value;
-
-        this.state.countSession = { name, date, note, items: [] };
-        const tbody = $('#count-table tbody');
-        
-        this.state.countSession.items = this.products.map(p => {
-            const stock = this.calculateStock(p.id);
-            return {
-                productId: p.id,
-                sku: p.sku,
-                name: p.name,
-                systemStock: stock,
-            };
-        });
-        
-        tbody.innerHTML = this.state.countSession.items.map(item => `
-            <tr>
-                <td>${item.sku}</td>
-                <td>${item.name}</td>
-                <td>${money(item.systemStock)}</td>
-                <td><input type="number" class="count-input" data-id="${item.productId}" value="${item.systemStock}"></td>
-                <td class="count-diff" data-id="${item.productId}">0</td>
-            </tr>
-        `).join('');
-        
-        $('#count-title').textContent = `Phiếu kiểm: ${name} - ${date}`;
-        $('#count-panel').style.display = 'block';
-        
-        // Add listeners for count inputs
-        $$('.count-input').forEach(input => {
-            input.addEventListener('input', e => {
-                const id = e.target.dataset.id;
-                const sessionItem = this.state.countSession.items.find(i => i.productId === id);
-                const counted = Number(e.target.value) || 0;
-                const diff = counted - sessionItem.systemStock;
-                $(`.count-diff[data-id="${id}"]`).textContent = money(diff);
-            });
-        });
-      },
-      
-      cancelCount() {
-        if (!confirm("Hủy phiên kiểm kê này?")) return;
-        this.state.countSession = null;
-        $('#count-panel').style.display = 'none';
-      },
-      
-      commitCount() {
-        if (!this.state.countSession || !confirm("Ghi nhận chênh lệch? Thao tác này sẽ tạo các giao dịch ĐIỀU CHỈNH (ADJ) cho các sản phẩm có chênh lệch.")) return;
-        
-        const data = DB.data;
-        let adjCount = 0;
-        
-        $$('.count-input').forEach(input => {
-            const id = input.dataset.id;
-            const sessionItem = this.state.countSession.items.find(i => i.productId === id);
-            const counted = Number(input.value) || 0;
-            const diff = counted - sessionItem.systemStock;
-            
-            if (diff !== 0) {
-                adjCount++;
-                const newTxn = {
-                    id: uuid(),
-                    productId: id,
-                    type: 'ADJ',
-                    qty: counted, // The new stock level
-                    date: this.state.countSession.date,
-                    note: `Kiểm kê: ${this.state.countSession.name}. Chênh lệch ${diff > 0 ? '+' : ''}${diff}`,
-                };
-                data.txns.push(newTxn);
-            }
-        });
-        
-        if (adjCount > 0) {
-            DB.data = data;
-            toast(`Đã tạo ${adjCount} giao dịch điều chỉnh.`);
-        } else {
-            toast("Không có chênh lệch nào được ghi nhận.");
-        }
-        
-        this.state.countSession = null;
-        $('#count-panel').style.display = 'none';
-      },
-
-      runReport() {
-        const from = $('#r-from').value;
-        const to = $('#r-to').value;
-        const wh = $('#r-warehouse').value;
-        
-        if (!from || !to) {
-            toast("Vui lòng chọn Từ ngày và Đến ngày.");
-            return;
-        }
-
-        const reportData = this.products.map(p => {
-            const txnsInPeriod = this.txns.filter(t => t.productId === p.id && t.date >= from && t.date <= to && (!wh || t.wh === wh));
-            const stockStart = this.calculateStock(p.id, from > "0000-00-00" ? new Date(new Date(from) - 1).toISOString().slice(0,10) : null);
-            
-            let totalIn = 0, totalOut = 0, totalAdj = 0;
-            txnsInPeriod.forEach(t => {
-                const qty = Number(t.qty) || 0;
-                if (t.type === 'IN') totalIn += qty;
-                else if (t.type === 'OUT') totalOut += qty;
-                else if (t.type === 'ADJ') totalAdj += (qty - this.calculateStock(p.id, t.date > "0000-00-00" ? new Date(new Date(t.date) - 1).toISOString().slice(0,10) : null)); // Adjustment is the difference
-            });
-            
-            const stockEnd = stockStart + totalIn - totalOut + totalAdj;
-
-            return {
-                sku: p.sku,
-                name: p.name,
-                stockStart,
-                totalIn,
-                totalOut,
-                totalAdj,
-                stockEnd
-            };
-        });
-
-        const tbody = $('#report-table tbody');
-        tbody.innerHTML = reportData.map(r => `
-            <tr>
-                <td>${r.sku}</td>
-                <td>${r.name}</td>
-                <td>${money(r.stockStart)}</td>
-                <td>${money(r.totalIn)}</td>
-                <td>${money(r.totalOut)}</td>
-                <td>${money(r.totalAdj)}</td>
-                <td>${money(r.stockEnd)}</td>
-            </tr>
-        `).join('');
-        $('#report-result-panel').style.display = 'block';
-        this.state.lastReport = reportData; // Save for export
-      },
-      
-      // --- IMPORT/EXPORT ---
-      exportToCsv(filename, rows) {
-        const header = Object.keys(rows[0]).join(',');
-        const csvContent = rows.map(row => Object.values(row).join(',')).join('\n');
-        const blob = new Blob(["\uFEFF" + header + '\n' + csvContent], { type: 'text/csv;charset=utf-8;' });
-        const link = document.createElement("a");
-        link.href = URL.createObjectURL(blob);
-        link.download = filename;
-        link.click();
-      },
-
-      exportProductsToCsv() {
-        if (this.products.length === 0) {
-            toast("Không có sản phẩm để xuất.");
-            return;
-        }
-        this.exportToCsv('products.csv', this.products);
-      },
-      
-      exportTxnsToCsv() {
-        if (this.txns.length === 0) {
-            toast("Không có giao dịch để xuất.");
-            return;
-        }
-        // To make it more useful, we join product info
-        const dataToExport = this.txns.map(t => {
+          tbody.innerHTML = sortedTxns.slice(0, 100).map(t => {
             const p = this.getProduct(t.productId);
-            return {
-                date: t.date,
-                type: t.type,
-                sku: p ? p.sku : 'N/A',
-                product_name: p ? p.name : 'N/A',
-                quantity_boxes: t.qty,
-                lot: t.lot,
-                expiry: t.expiry,
-                warehouse: t.wh,
-                note: t.note
-            };
-        });
-        this.exportToCsv('transactions.csv', dataToExport);
-      },
+            const typeMap = { 'IN': 'Nhập', 'OUT': 'Xuất', 'ADJ': 'Điều chỉnh' };
+            const typeClass = { 'IN': 'color:var(--ok)', 'OUT': 'color:var(--danger)', 'ADJ': 'color:var(--warn)' };
+            return `
+              <tr>
+                <td>${t.date}</td>
+                <td style="${typeClass[t.type]}"><b>${typeMap[t.type]}</b></td>
+                <td>${p ? p.sku : 'N/A'}</td>
+                <td>${p ? p.name : 'Sản phẩm đã xóa'}</td>
+                <td>${t.type === 'OUT' ? '-' : ''}${money(t.qty)}</td>
+                <td>${t.lot || '—'}</td>
+                <td>${t.expiry || '—'}</td>
+                <td>${t.wh || '—'}</td>
+                <td>${t.note || '—'}</td>
+                <td><button class="btn btn-delete-txn" data-id="${t.id}">Xóa</button></td>
+              </tr>
+            `;
+          }).join('');
+          this.populateTxnProductSelect();
+        },
 
-      exportReportToCsv() {
-        if (!this.state.lastReport || this.state.lastReport.length === 0) {
-            toast("Chưa có báo cáo để xuất. Vui lòng chạy báo cáo trước.");
-            return;
-        }
-        this.exportToCsv('inventory_report.csv', this.state.lastReport);
-      },
-
-      exportJson() {
-        const dataStr = JSON.stringify(DB.data, null, 2);
-        const blob = new Blob([dataStr], {type: "application/json"});
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `golden-gloves-backup-${today()}.json`;
-        a.click();
-        URL.revokeObjectURL(url);
-        toast("Đã xuất tệp sao lưu JSON.");
-      },
-
-      importJson(event) {
-        const file = event.target.files[0];
-        if (!file) return;
-        if (!confirm("Phục hồi từ tệp JSON sẽ GHI ĐÈ toàn bộ dữ liệu hiện tại. Bạn có chắc chắn?")) return;
+        populateTxnProductSelect() {
+          const select = $('#t-prod');
+          const currentVal = select.value;
+          select.innerHTML = '<option value="">-- Chọn sản phẩm --</option>' + [...this.products].sort((a,b) => a.name.localeCompare(b.name)).map(p =>
+            `<option value="${p.id}">${p.name} (SKU: ${p.sku})</option>`
+          ).join('');
+          select.value = currentVal;
+        },
         
-        const reader = new FileReader();
-        reader.onload = e => {
-            try {
-                const importedData = JSON.parse(e.target.result);
-                if (importedData.products && importedData.txns) {
-                    DB.data = importedData;
-                    toast("Đã phục hồi dữ liệu thành công.");
-                } else {
-                    toast("Lỗi: Tệp JSON không hợp lệ.");
-                }
-            } catch (err) {
-                toast("Lỗi: Không thể đọc tệp JSON.");
-                console.error(err);
-            }
-        };
-        reader.readAsText(file);
-        event.target.value = ''; // Reset input
-      },
-      
-      // --- SETTINGS ---
-      seedData() {
-        if (!confirm("Tạo dữ liệu mẫu? Dữ liệu hiện tại sẽ bị xóa.")) return;
-        const sampleData = {
-            products: [
-                {id: "p1", sku: "NBLS", name: "Găng Nitrile Xanh Size S", material: "Nitrile", size: "S", color: "Xanh", thick: "4.5", reorder: "50", perbox: "100", percarton: "10", cost: "55000", price: "75000", note: ""},
-                {id: "p2", sku: "NBLM", name: "Găng Nitrile Xanh Size M", material: "Nitrile", size: "M", color: "Xanh", thick: "4.5", reorder: "100", perbox: "100", percarton: "10", cost: "55000", price: "75000", note: ""},
-                {id: "p3", sku: "LWHL", name: "Găng Latex Trắng Size L", material: "Latex", size: "L", color: "Trắng", thick: "5.0", reorder: "20", perbox: "100", percarton: "10", cost: "50000", price: "70000", note: ""},
-                {id: "p4", sku: "NBKX", name: "Găng Nitrile Đen Size XL", material: "Nitrile", size: "XL", color: "Đen", thick: "4.0", reorder: "10", perbox: "100", percarton: "10", cost: "60000", price: "85000", note: ""}
-            ],
-            txns: [
-                {id: "t1", productId: "p1", type: "IN", qty: 100, date: "2025-08-01", lot: "L001", expiry: "2027-08-01", wh: "Kho A", note: "Nhập hàng đầu kỳ"},
-                {id: "t2", productId: "p2", type: "IN", qty: 200, date: "2025-08-02", lot: "L002", expiry: "2027-08-02", wh: "Kho A", note: "Nhập hàng đầu kỳ"},
-                {id: "t3", productId: "p3", type: "IN", qty: 50, date: "2025-08-03", lot: "L003", expiry: "2026-08-03", wh: "Kho B", note: "Nhập hàng đầu kỳ"},
-                {id: "t4", productId: "p2", type: "OUT", qty: 20, date: "2025-08-10", note: "Xuất cho khách X"},
-                {id: "t5", productId: "p1", type: "OUT", qty: 10, date: "2025-08-12", note: "Xuất cho khách Y"},
-            ],
-            settings: {}
-        };
-        DB.data = sampleData;
-        toast("Đã tạo dữ liệu mẫu thành công.");
-      },
-      
-      resetData() {
-        if (!confirm("CẢNH BÁO: Thao tác này sẽ XÓA TOÀN BỘ dữ liệu sản phẩm và giao dịch. Không thể hoàn tác. Bạn có chắc chắn muốn tiếp tục?")) return;
-        DB.reset();
-        toast("Đã xóa toàn bộ dữ liệu.");
-      }
-    };
+        updateTxnHints() {
+          const productId = $('#t-prod').value;
+          if (!productId) {
+              $('#unit-hint').textContent = '—';
+              $('#fefo-hint').textContent = '—';
+              return;
+          }
+          const p = this.getProduct(productId);
+          $('#unit-hint').textContent = `1 thùng = ${p.percarton} hộp`;
+          
+          const nextExp = this.nextExpiring(productId);
+          if (nextExp) {
+              $('#fefo-hint').textContent = `Lô xuất đi gần nhất: ${nextExp.lot} (HSD: ${nextExp.expiry || 'N/A'}), tồn: ${money(nextExp.qty)}`;
+          } else {
+              $('#fefo-hint').textContent = `Sản phẩm chưa có lô nào.`
+          }
+        },
+        
+        updateUndoButton() {
+          $('#btn-undo').disabled = this.txns.length === 0;
+        },
 
-    // --- START THE APP ---
-    document.addEventListener('DOMContentLoaded', () => App.init());
+        showProdForm() {
+          this.state.editingProductId = null;
+          $('#prod-form-panel').style.display = 'block';
+          $('#prod-form-title').textContent = 'Thêm sản phẩm mới';
+          $('#prod-form').reset();
+          $('#p-sku').focus();
+        },
+
+        hideProdForm() {
+          $('#prod-form-panel').style.display = 'none';
+        },
+
+        saveProduct() {
+          const sku = $('#p-sku').value.trim();
+          const name = $('#p-name').value.trim();
+          if (!sku || !name) {
+            toast("Lỗi: SKU và Tên sản phẩm là bắt buộc.");
+            return;
+          }
+
+          const data = DB.data;
+          const newProduct = {
+            id: this.state.editingProductId || uuid(),
+            sku, name,
+            material: $('#p-material').value,
+            size: $('#p-size').value,
+            color: $('#p-color').value,
+            thick: $('#p-thick').value,
+            reorder: $('#p-reorder').value,
+            perbox: $('#p-perbox').value,
+            percarton: $('#p-percarton').value,
+            cost: $('#p-cost').value,
+            price: $('#p-price').value,
+            note: $('#p-note').value,
+          };
+
+          if (this.state.editingProductId) {
+            const index = data.products.findIndex(p => p.id === this.state.editingProductId);
+            data.products[index] = newProduct;
+            toast("Đã cập nhật sản phẩm.");
+          } else {
+            if (data.products.some(p => p.sku.toLowerCase() === sku.toLowerCase())) {
+                toast("Lỗi: SKU đã tồn tại.");
+                return;
+            }
+            data.products.push(newProduct);
+            toast("Đã thêm sản phẩm mới.");
+          }
+          DB.data = data;
+          this.hideProdForm();
+        },
+
+        editProduct(id) {
+          const p = this.getProduct(id);
+          if (!p) return;
+          this.showProdForm();
+          $('#prod-form-title').textContent = 'Chỉnh sửa sản phẩm';
+          this.state.editingProductId = id;
+
+          $('#p-id').value = p.id;
+          $('#p-sku').value = p.sku;
+          $('#p-name').value = p.name;
+          $('#p-material').value = p.material;
+          $('#p-size').value = p.size;
+          $('#p-color').value = p.color;
+          $('#p-thick').value = p.thick;
+          $('#p-reorder').value = p.reorder;
+          $('#p-perbox').value = p.perbox;
+          $('#p-percarton').value = p.percarton;
+          $('#p-cost').value = p.cost;
+          $('#p-price').value = p.price;
+          $('#p-note').value = p.note;
+        },
+
+        deleteProduct(id) {
+          if (!confirm("Bạn có chắc muốn xóa sản phẩm này? Mọi giao dịch liên quan sẽ không hiển thị tên sản phẩm nữa.")) return;
+          const data = DB.data;
+          data.products = data.products.filter(p => p.id !== id);
+          DB.data = data;
+          toast("Đã xóa sản phẩm.");
+        },
+        
+        deleteTransaction(id) {
+          if (!confirm("Bạn có chắc muốn xóa vĩnh viễn giao dịch này? Hành động này không thể hoàn tác.")) return;
+          const data = DB.data;
+          data.txns = data.txns.filter(t => t.id !== id);
+          DB.data = data;
+          toast("Đã xóa giao dịch.");
+        },
+
+        addTransaction() {
+          const productId = $('#t-prod').value;
+          if (!productId) {
+            toast("Vui lòng chọn một sản phẩm.");
+            return;
+          }
+          const product = this.getProduct(productId);
+          const qtyInput = Number($('#t-qty').value);
+          const unit = $('#t-unit').value;
+          const qtyInBoxes = unit === 'CARTON' ? qtyInput * (Number(product.percarton) || 1) : qtyInput;
+          
+          if (qtyInBoxes <= 0) {
+              toast("Số lượng phải lớn hơn 0.");
+              return;
+          }
+
+          const data = DB.data;
+          const newTxn = {
+            id: uuid(),
+            productId,
+            type: $('#t-type').value,
+            qty: qtyInBoxes,
+            date: $('#t-date').value || today(),
+            lot: $('#t-lot').value.trim(),
+            expiry: $('#t-exp').value,
+            wh: $('#t-warehouse').value.trim(),
+            note: $('#t-note').value.trim(),
+          };
+          data.txns.push(newTxn);
+          DB.data = data;
+          toast("Đã thêm giao dịch.");
+          $('#txn-form').reset();
+          $('#t-date').value = today();
+        },
+        
+        undoLastTransaction() {
+          if (this.txns.length === 0) return;
+          if (!confirm("Bạn có chắc muốn hoàn tác (xóa) giao dịch cuối cùng?")) return;
+          
+          const data = DB.data;
+          data.txns.sort((a, b) => (b.date + b.id).localeCompare(a.date + a.id));
+          data.txns.shift();
+          DB.data = data;
+          toast("Đã hoàn tác giao dịch cuối cùng.");
+        },
+
+        startCount() {
+          const name = $('#c-name').value || 'Kiểm kê';
+          const date = $('#c-date').value || today();
+          const note = $('#c-note').value;
+
+          this.state.countSession = { name, date, note, items: [] };
+          const tbody = $('#count-table tbody');
+          
+          this.state.countSession.items = this.products.map(p => {
+              const stock = this.calculateStock(p.id);
+              return {
+                  productId: p.id,
+                  sku: p.sku,
+                  name: p.name,
+                  systemStock: stock,
+              };
+          });
+          
+          tbody.innerHTML = this.state.countSession.items.map(item => `
+              <tr>
+                  <td>${item.sku}</td>
+                  <td>${item.name}</td>
+                  <td>${money(item.systemStock)}</td>
+                  <td><input type="number" class="count-input" data-id="${item.productId}" value="${item.systemStock}"></td>
+                  <td class="count-diff" data-id="${item.productId}">0</td>
+              </tr>
+          `).join('');
+          
+          $('#count-title').textContent = `Phiếu kiểm: ${name} - ${date}`;
+          $('#count-panel').style.display = 'block';
+          
+          $$('.count-input').forEach(input => {
+              input.addEventListener('input', e => {
+                  const id = e.target.dataset.id;
+                  const sessionItem = this.state.countSession.items.find(i => i.productId === id);
+                  const counted = Number(e.target.value) || 0;
+                  const diff = counted - sessionItem.systemStock;
+                  $(`.count-diff[data-id="${id}"]`).textContent = money(diff);
+              });
+          });
+        },
+        
+        cancelCount() {
+          if (!confirm("Hủy phiên kiểm kê này?")) return;
+          this.state.countSession = null;
+          $('#count-panel').style.display = 'none';
+        },
+        
+        commitCount() {
+          if (!this.state.countSession || !confirm("Ghi nhận chênh lệch? Thao tác này sẽ tạo các giao dịch ĐIỀU CHỈNH (ADJ) cho các sản phẩm có chênh lệch.")) return;
+          
+          const data = DB.data;
+          let adjCount = 0;
+          
+          $$('.count-input').forEach(input => {
+              const id = input.dataset.id;
+              const counted = Number(input.value) || 0;
+              const sessionItem = this.state.countSession.items.find(i => i.productId === id);
+              
+              if (counted !== sessionItem.systemStock) {
+                  adjCount++;
+                  const diff = counted - sessionItem.systemStock;
+                  const newTxn = {
+                      id: uuid(),
+                      productId: id,
+                      type: 'ADJ',
+                      qty: counted,
+                      date: this.state.countSession.date,
+                      note: `Kiểm kê: ${this.state.countSession.name}. Chênh lệch ${diff > 0 ? '+' : ''}${diff}`,
+                  };
+                  data.txns.push(newTxn);
+              }
+          });
+          
+          if (adjCount > 0) {
+              DB.data = data;
+              toast(`Đã tạo ${adjCount} giao dịch điều chỉnh.`);
+          } else {
+              toast("Không có chênh lệch nào được ghi nhận.");
+          }
+          
+          this.state.countSession = null;
+          $('#count-panel').style.display = 'none';
+        },
+
+        runReport() {
+            const from = $('#r-from').value;
+            const to = $('#r-to').value;
+            const wh = $('#r-warehouse').value;
+
+            if (!from || !to) {
+                toast("Vui lòng chọn Từ ngày và Đến ngày.");
+                return;
+            }
+
+            const reportData = this.products.map(p => {
+                const fromDateForStock = new Date(from);
+                fromDateForStock.setDate(fromDateForStock.getDate() - 1);
+                const stockStart = this.calculateStock(p.id, fromDateForStock.toISOString().slice(0, 10), wh);
+
+                const txnsInPeriod = this.txns.filter(t => t.productId === p.id && t.date >= from && t.date <= to && (!wh || t.wh === wh));
+                
+                let totalIn = 0, totalOut = 0, totalAdjValue = 0;
+                let lastStock = stockStart;
+
+                txnsInPeriod.sort((a,b)=>a.date.localeCompare(b.date)).forEach(t => {
+                    const qty = Number(t.qty) || 0;
+                    if (t.type === 'IN') totalIn += qty;
+                    else if (t.type === 'OUT') totalOut += qty;
+                    else if (t.type === 'ADJ') {
+                        totalAdjValue += (qty - lastStock);
+                    }
+                    lastStock = this.calculateStock(p.id, t.date, wh);
+                });
+                
+                const stockEnd = stockStart + totalIn - totalOut + totalAdjValue;
+
+                return { sku: p.sku, name: p.name, stockStart, totalIn, totalOut, totalAdj: totalAdjValue, stockEnd };
+            });
+
+            const tbody = $('#report-table tbody');
+            tbody.innerHTML = reportData.map(r => `
+                <tr>
+                    <td>${r.sku}</td>
+                    <td>${r.name}</td>
+                    <td>${money(r.stockStart)}</td>
+                    <td>${money(r.totalIn)}</td>
+                    <td>${money(r.totalOut)}</td>
+                    <td>${money(r.totalAdj)}</td>
+                    <td>${money(r.stockEnd)}</td>
+                </tr>
+            `).join('');
+            $('#report-result-panel').style.display = 'block';
+            this.state.lastReport = reportData;
+        },
+        
+        exportToCsv(filename, rows) {
+          if (rows.length === 0) return;
+          const header = Object.keys(rows[0]).join(',');
+          const csvContent = rows.map(row => Object.values(row).map(val => `"${String(val).replace(/"/g, '""')}"`).join(',')).join('\n');
+          const blob = new Blob(["\uFEFF" + header + '\n' + csvContent], { type: 'text/csv;charset=utf-8;' });
+          const link = document.createElement("a");
+          link.href = URL.createObjectURL(blob);
+          link.download = filename;
+          link.click();
+        },
+
+        exportProductsToCsv() {
+          if (this.products.length === 0) { toast("Không có sản phẩm để xuất."); return; }
+          this.exportToCsv('products.csv', this.products);
+        },
+        
+        exportTxnsToCsv() {
+          if (this.txns.length === 0) { toast("Không có giao dịch để xuất."); return; }
+          const dataToExport = this.txns.map(t => {
+              const p = this.getProduct(t.productId);
+              return { date: t.date, type: t.type, sku: p ? p.sku : 'N/A', product_name: p ? p.name : 'N/A', quantity_boxes: t.qty, lot: t.lot, expiry: t.expiry, warehouse: t.wh, note: t.note };
+          });
+          this.exportToCsv('transactions.csv', dataToExport);
+        },
+
+        exportReportToCsv() {
+          if (!this.state.lastReport || this.state.lastReport.length === 0) { toast("Chưa có báo cáo để xuất. Vui lòng chạy báo cáo trước."); return; }
+          this.exportToCsv('inventory_report.csv', this.state.lastReport);
+        },
+
+        exportJson() {
+          const dataStr = JSON.stringify(DB.data, null, 2);
+          const blob = new Blob([dataStr], {type: "application/json"});
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `golden-gloves-backup-${today()}.json`;
+          a.click();
+          URL.revokeObjectURL(url);
+          toast("Đã xuất tệp sao lưu JSON.");
+        },
+
+        importJson(event) {
+          const file = event.target.files[0];
+          if (!file) return;
+          if (!confirm("Phục hồi từ tệp JSON sẽ GHI ĐÈ toàn bộ dữ liệu hiện tại. Bạn có chắc chắn?")) return;
+          
+          const reader = new FileReader();
+          reader.onload = e => {
+              try {
+                  const importedData = JSON.parse(e.target.result);
+                  if (importedData.products && importedData.txns) {
+                      DB.data = importedData;
+                      toast("Đã phục hồi dữ liệu thành công.");
+                  } else {
+                      toast("Lỗi: Tệp JSON không hợp lệ.");
+                  }
+              } catch (err) {
+                  toast("Lỗi: Không thể đọc tệp JSON.");
+                  console.error(err);
+              }
+          };
+          reader.readAsText(file);
+          event.target.value = '';
+        },
+        
+        seedData() {
+          if (!confirm("Tạo dữ liệu mẫu? Dữ liệu hiện tại sẽ bị xóa.")) return;
+          const sampleData = {
+              products: [
+                  {id: "p1", sku: "NBLS", name: "Găng Nitrile Xanh Size S", material: "Nitrile", size: "S", color: "Xanh", thick: "4.5", reorder: "50", perbox: "100", percarton: "10", cost: "55000", price: "75000", note: ""},
+                  {id: "p2", sku: "NBLM", name: "Găng Nitrile Xanh Size M", material: "Nitrile", size: "M", color: "Xanh", thick: "4.5", reorder: "100", perbox: "100", percarton: "10", cost: "55000", price: "75000", note: ""},
+                  {id: "p3", sku: "LWHL", name: "Găng Latex Trắng Size L", material: "Latex", size: "L", color: "Trắng", thick: "5.0", reorder: "20", perbox: "100", percarton: "10", cost: "50000", price: "70000", note: ""},
+                  {id: "p4", sku: "NBKX", name: "Găng Nitrile Đen Size XL", material: "Nitrile", size: "XL", color: "Đen", thick: "4.0", reorder: "10", perbox: "100", percarton: "10", cost: "60000", price: "85000", note: ""}
+              ],
+              txns: [
+                  {id: "t1", productId: "p1", type: "IN", qty: 100, date: "2025-08-01", lot: "L001", expiry: "2027-08-01", wh: "Kho A", note: "Nhập hàng đầu kỳ"},
+                  {id: "t2", productId: "p2", type: "IN", qty: 200, date: "2025-08-02", lot: "L002", expiry: "2027-08-02", wh: "Kho A", note: "Nhập hàng đầu kỳ"},
+                  {id: "t3", productId: "p3", type: "IN", qty: 50, date: "2025-08-03", lot: "L003", expiry: "2026-08-03", wh: "Kho B", note: "Nhập hàng đầu kỳ"},
+                  {id: "t4", productId: "p2", type: "OUT", qty: 20, date: "2025-08-10", note: "Xuất cho khách X"},
+                  {id: "t5", productId: "p1", type: "OUT", qty: 10, date: "2025-08-12", note: "Xuất cho khách Y"},
+              ],
+              settings: {}
+          };
+          DB.data = sampleData;
+          toast("Đã tạo dữ liệu mẫu thành công.");
+        },
+        
+        resetData() {
+          if (!confirm("CẢNH BÁO: Thao tác này sẽ XÓA TOÀN BỘ dữ liệu sản phẩm và giao dịch. Không thể hoàn tác. Bạn có chắc chắn muốn tiếp tục?")) return;
+          DB.reset();
+          toast("Đã xóa toàn bộ dữ liệu.");
+        }
+      };
+
+      // --- START THE APP ---
+      // Sự kiện này đảm bảo code chỉ chạy sau khi toàn bộ HTML đã được tải.
+      document.addEventListener('DOMContentLoaded', () => App.init());
+    })();
   </script>
 </body>
 </html>
